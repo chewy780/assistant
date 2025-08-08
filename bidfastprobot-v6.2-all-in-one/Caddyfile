@@ -1,0 +1,9 @@
+{$PRIMARY_DOMAIN} {
+  encode gzip
+  @api path /api/* /healthz /events/* /artifacts/*
+  handle @api { reverse_proxy api:8000 }
+  handle_path /preview/* { reverse_proxy preview:{$PREVIEW_GATEWAY_PORT} }
+  handle_path /prod/* { reverse_proxy preview:{$PREVIEW_GATEWAY_PORT} }
+  handle { root * /srv/ui; file_server; try_files {path} /index.html }
+}
+*.preview.{$PRIMARY_DOMAIN} { encode gzip; reverse_proxy preview:{$PREVIEW_GATEWAY_PORT} }

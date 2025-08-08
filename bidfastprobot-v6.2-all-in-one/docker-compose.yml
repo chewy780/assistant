@@ -1,0 +1,117 @@
+version: "3.9"
+networks: { appnet: { name: bidfastnet } }
+x-hardened: &hardened { user: "${HARDENING_UID:-1000}:${HARDENING_GID:-1000}", cap_drop: ["ALL"], security_opt: ["no-new-privileges:true"] }
+services:
+  api:
+    <<: *hardened
+    image: python:3.12-slim
+    working_dir: /app
+    command: bash -lc "pip install -U pip && pip install -e . && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    environment: [ ADMIN_API_KEY=${ADMIN_API_KEY}, OPENAI_API_KEY=${OPENAI_API_KEY}, REDIS_URL=${REDIS_URL}, OPENAI_EMBEDDINGS_MODEL=${OPENAI_EMBEDDINGS_MODEL}, EMBEDDING_DIM=${EMBEDDING_DIM}, POSTGRES_HOST=${POSTGRES_HOST}, POSTGRES_PORT=${POSTGRES_PORT}, POSTGRES_USER=${POSTGRES_USER}, POSTGRES_PASSWORD=${POSTGRES_PASSWORD}, POSTGRES_DB=${POSTGRES_DB}, ARTIFACT_BACKEND=${ARTIFACT_BACKEND}, S3_ENDPOINT_URL=${S3_ENDPOINT_URL}, S3_ACCESS_KEY=${S3_ACCESS_KEY}, S3_SECRET_KEY=${S3_SECRET_KEY}, S3_BUCKET=${S3_BUCKET}, S3_REGION=${S3_REGION}, BUILDS_ROOT=/builds, PRIMARY_DOMAIN=${PRIMARY_DOMAIN} ]
+    volumes: [ "./backend:/app", "builds:/builds:rw" ]
+    depends_on: [redis, db]
+    networks: [appnet]
+
+  worker:
+    <<: *hardened
+    image: python:3.12-slim
+    working_dir: /worker
+    command: bash -lc "pip install -U pip && pip install -e . && python main.py"
+    environment: [ ADMIN_API_KEY=${ADMIN_API_KEY}, DEFAULT_MODEL=${DEFAULT_MODEL}, FALLBACK_MODELS=${FALLBACK_MODELS}, MAX_TOKENS_PER_TASK=${MAX_TOKENS_PER_TASK}, MAX_COST_PER_TASK_USD=${MAX_COST_PER_TASK_USD}, OPENAI_API_KEY=${OPENAI_API_KEY}, REDIS_URL=${REDIS_URL}, ARTIFACT_BACKEND=${ARTIFACT_BACKEND}, S3_ENDPOINT_URL=${S3_ENDPOINT_URL}, S3_ACCESS_KEY=${S3_ACCESS_KEY}, S3_SECRET_KEY=${S3_SECRET_KEY}, S3_BUCKET=${S3_BUCKET}, S3_REGION=${S3_REGION}, BUILDS_ROOT=/builds, PREVIEW_INTERNAL_PORT_NODE=${PREVIEW_INTERNAL_PORT_NODE}, PREVIEW_INTERNAL_PORT_PY=${PREVIEW_INTERNAL_PORT_PY}, PREVIEW_NETWORK=${PREVIEW_NETWORK}, LIGHTHOUSE_MIN_SCORE=${LIGHTHOUSE_MIN_SCORE}, LIGHTHOUSE_TIMEOUT_S=${LIGHTHOUSE_TIMEOUT_S}, PRIMARY_DOMAIN=${PRIMARY_DOMAIN}, DNS_PROVIDER=${DNS_PROVIDER}, SERVER_PUBLIC_IP=${SERVER_PUBLIC_IP}, CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}, CLOUDFLARE_ZONE_ID=${CLOUDFLARE_ZONE_ID}, HOSTED_ZONE_ID=${HOSTED_ZONE_ID}, OPENAI_EMBEDDINGS_MODEL=${OPENAI_EMBEDDINGS_MODEL}, EMBEDDING_DIM=${EMBEDDING_DIM}, POSTGRES_HOST=${POSTGRES_HOST}, POSTGRES_PORT=${POSTGRES_PORT}, POSTGRES_USER=${POSTGRES_USER}, POSTGRES_PASSWORD=${POSTGRES_PASSWORD}, POSTGRES_DB=${POSTGRES_DB} ]
+    volumes: [ "./worker:/worker", "builds:/builds:rw", "/var/run/docker.sock:/var/run/docker.sock" ]
+    depends_on: [redis, db]
+    networks: [appnet]
+
+  preview:
+    <<: *hardened
+    image: node:20
+    working_dir: /gateway
+    command: bash -lc "npm ci && node server.js"
+    environment: [ REDIS_URL=${REDIS_URL}, PREVIEW_GATEWAY_PORT=${PREVIEW_GATEWAY_PORT} ]
+    volumes: [ "./preview:/gateway" ]
+    depends_on: [redis]
+    networks: [appnet]
+
+  prometheus:
+    image: prom/prometheus
+    volumes: [ "./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro" ]
+    ports: ["9090:9090"]
+    networks: [appnet]
+
+  grafana:
+    image: grafana/grafana
+    volumes: [ "grafana-data:/var/lib/grafana", "./observability/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml" ]
+    ports: ["3001:3000"]
+    networks: [appnet]
+
+  loki:
+    image: grafana/loki:2.9.4
+    command: -config.file=/etc/loki/local-config.yaml
+    ports: ["3100:3100"]
+    networks: [appnet]
+
+  promtail:
+    image: grafana/promtail:2.9.4
+    volumes: [ "/var/log:/var/log", "./observability/promtail-config.yml:/etc/promtail/config.yml" ]
+    command: -config.file=/etc/promtail/config.yml
+    networks: [appnet]
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    privileged: true
+    ports: ["8080:8080"]
+    volumes: [ "/:/rootfs:ro", "/var/run:/var/run:ro", "/sys:/sys:ro", "/var/lib/docker/:/var/lib/docker:ro" ]
+    networks: [appnet]
+
+  minio:
+    image: minio/minio
+    environment: [ MINIO_ROOT_USER=${S3_ACCESS_KEY}, MINIO_ROOT_PASSWORD=${S3_SECRET_KEY} ]
+    command: server /data --console-address ":9001"
+    ports: ["9000:9000","9001:9001"]
+    volumes: [ "minio-data:/data" ]
+    networks: [appnet]
+
+  vault:
+    image: vault:1.14
+    environment: [ VAULT_DEV_ROOT_TOKEN_ID=${ADMIN_API_KEY}, VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200 ]
+    ports: ["8200:8200"]
+    cap_add: ["IPC_LOCK"]
+    networks: [appnet]
+
+  bootstrap:
+    image: python:3.12-slim
+    working_dir: /bootstrap
+    command: bash -lc "pip install -U pip && pip install -r requirements.txt && python main.py"
+    environment: [ ARTIFACT_BACKEND=${ARTIFACT_BACKEND}, S3_ENDPOINT_URL=${S3_ENDPOINT_URL}, S3_ACCESS_KEY=${S3_ACCESS_KEY}, S3_SECRET_KEY=${S3_SECRET_KEY}, S3_BUCKET=${S3_BUCKET}, S3_REGION=${S3_REGION}, DNS_PROVIDER=${DNS_PROVIDER}, PRIMARY_DOMAIN=${PRIMARY_DOMAIN}, SERVER_PUBLIC_IP=${SERVER_PUBLIC_IP}, CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}, CLOUDFLARE_ZONE_ID=${CLOUDFLARE_ZONE_ID}, HOSTED_ZONE_ID=${HOSTED_ZONE_ID} ]
+    volumes: [ "./bootstrap:/bootstrap" ]
+    depends_on: [minio]
+    networks: [appnet]
+
+  db:
+    image: postgres:16
+    environment: { POSTGRES_USER: ${POSTGRES_USER}, POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}, POSTGRES_DB: ${POSTGRES_DB} }
+    volumes: [ "pgdata:/var/lib/postgresql/data", "./db/init:/docker-entrypoint-initdb.d:ro" ]
+    networks: [appnet]
+
+  redis:
+    image: redis:7
+    command: ["redis-server","--save","60","1"]
+    volumes: [ "redisdata:/data" ]
+    networks: [appnet]
+
+  frontend:
+    image: node:20
+    working_dir: /ui
+    command: bash -lc "printf '<!doctype html><title>BidFast</title><h1>UI coming next</h1>' > index.html && mkdir -p dist && cp index.html dist/index.html && tail -f /dev/null"
+    volumes: [ "./frontend:/ui", "ui_build:/ui/dist" ]
+    networks: [appnet]
+
+  caddy:
+    image: caddy:2
+    depends_on: [api, frontend, preview]
+    ports: ["80:80","443:443"]
+    environment: [ PRIMARY_DOMAIN=${PRIMARY_DOMAIN}, PREVIEW_GATEWAY_PORT=${PREVIEW_GATEWAY_PORT} ]
+    volumes: [ "./Caddyfile:/etc/caddy/Caddyfile:ro", "ui_build:/srv/ui", "caddy_data:/data", "caddy_config:/config" ]
+    networks: [appnet]
+
+volumes: { pgdata: {}, redisdata: {}, ui_build: {}, caddy_data: {}, caddy_config: {}, builds: {}, grafana-data: {}, minio-data: {} }

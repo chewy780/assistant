@@ -1,0 +1,1 @@
+export default { content:['./index.html','./src/**/*.{ts,tsx}'], theme:{ extend:{ colors:{ hub:{ bg:'#0b0f19', card:'#111827', accent:'#60a5fa' }}}}, plugins:[] }

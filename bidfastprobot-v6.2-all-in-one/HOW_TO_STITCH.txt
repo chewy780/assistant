@@ -1,0 +1,1 @@
+Unzip this core stack, then unzip: backend-semantic.zip, worker-semantic.zip, frontend-ui.zip into the SAME folder. Fill .env, then `docker compose up -d --build`.
